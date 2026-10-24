@@ -186,7 +186,17 @@ export class HookOneBot {
     if (!this.status.native_sticker_send) fail('NATIVE_STICKER_UNAVAILABLE');
     const wxid = await this.resolveTarget(kind, target);
     const md5 = crypto.createHash('md5').update(fs.readFileSync(filePath)).digest('hex');
-    const accepted = await this.native('/SendStickerMsg', { wxidorgid: wxid, sticker: { md5 }, path: filePath }, identity.account);
+    let accepted;
+    try {
+      accepted = await this.native('/SendStickerMsg', { wxidorgid: wxid, sticker: { md5 }, path: filePath }, identity.account);
+    } catch (error) {
+      // 微信表情通道对非 gif / 超大图会直接 400，退回文件发送，避免整条消息丢失。
+      if (error?.message !== 'API_HTTP_400') throw error;
+      accepted = await this.native('/SendFileMsg', { wxidorgid: wxid, path: filePath, md5, size: fs.statSync(filePath).size }, identity.account);
+      if (accepted?.ret !== 0) fail('NATIVE_STICKER_REJECTED');
+      this.status.confirmed_sends = (this.status.confirmed_sends ?? 0) + 1;
+      return { message_id: 0, file: filePath, media_type: 'wechat-file' };
+    }
     if (accepted?.ret !== 0) fail('NATIVE_STICKER_REJECTED');
     this.status.confirmed_sends = (this.status.confirmed_sends ?? 0) + 1;
     return { message_id: 0, file: filePath, media_type: 'wechat-sticker' };

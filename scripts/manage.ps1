@@ -1,4 +1,4 @@
-param([ValidateSet('start','stop','restart','status','prepare')][string]$Action = 'start')
+﻿param([ValidateSet('start','stop','restart','status','prepare')][string]$Action = 'start')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $stateDir = Join-Path $root 'state'
@@ -181,6 +181,8 @@ $node = (Get-Command node -ErrorAction Stop).Source
 if ($LASTEXITCODE -ne 0) { throw 'Invalid project configuration.' }
 $config = Get-Content (Join-Path $root 'config\wechatagent.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $hookSender = $config.runtime.sender -eq 'wechat-hook'
+$integration = if ($config.runtime.integration) { [string]$config.runtime.integration } else { 'dsh' }
+$astrbotMode = $integration -eq 'astrbot'
 if ($Action -eq 'prepare') { exit 0 }
 if ($Action -eq 'status') { Show-Status $config; exit 0 }
 if ($Action -eq 'restart') { Stop-Services }
@@ -215,26 +217,30 @@ try {
         & $node (Join-Path $PSScriptRoot 'hook-onebot.mjs') --check
         if ($LASTEXITCODE -ne 0) { throw 'WeChat-Hook is not ready. Use Open WeChat in WeChatAgent, finish login, then start again. Check the error above and state/logs/hook-init.log for native initialization details.' }
     }
-    $env:SOCIAL_DSH_TOKEN = (Get-Content (Join-Path $stateDir 'social-dsh-token.txt') -Raw).Trim()
-    $dshUrl = 'http://127.0.0.1:'+$config.ports.dshPlugin+'/health'
-    if (-not (Test-Port ([int]$config.ports.dshPlugin))) {
-        if (-not $config.runtime.dshDesktop -or -not (Test-Path -LiteralPath $config.runtime.dshDesktop)) { throw 'DSH_NOT_CONFIGURED: Install DSH from the setup link, then select its executable and save settings.' }
-        & (Join-Path $PSScriptRoot 'launch-dsh.ps1')
-        for($i=0;$i -lt 60 -and -not (Test-Port ([int]$config.ports.dshPlugin));$i++){Start-Sleep -Milliseconds 250}
-        if (-not (Test-Port ([int]$config.ports.dshPlugin))) { throw 'DSH_PLUGIN_NOT_READY: Enable the local plugin in DSH and fully reopen DSH from the tray.' }
+    if (-not $astrbotMode) {
+        $env:SOCIAL_DSH_TOKEN = (Get-Content (Join-Path $stateDir 'social-dsh-token.txt') -Raw).Trim()
+        $dshUrl = 'http://127.0.0.1:'+$config.ports.dshPlugin+'/health'
+        if (-not (Test-Port ([int]$config.ports.dshPlugin))) {
+            if (-not $config.runtime.dshDesktop -or -not (Test-Path -LiteralPath $config.runtime.dshDesktop)) { throw 'DSH_NOT_CONFIGURED: Install DSH from the setup link, then select its executable and save settings.' }
+            & (Join-Path $PSScriptRoot 'launch-dsh.ps1')
+            for($i=0;$i -lt 60 -and -not (Test-Port ([int]$config.ports.dshPlugin));$i++){Start-Sleep -Milliseconds 250}
+            if (-not (Test-Port ([int]$config.ports.dshPlugin))) { throw 'DSH_PLUGIN_NOT_READY: Enable the local plugin in DSH and fully reopen DSH from the tray.' }
+        }
+        $health = Invoke-RestMethod $dshUrl -Headers @{Authorization='Bearer '+$env:SOCIAL_DSH_TOKEN} -TimeoutSec 3
+        $accountIdentityFile = Join-Path $stateDir 'weflow\active-account.json'
+        if (Test-Path -LiteralPath $accountIdentityFile) {
+            $accountIdentity = Get-Content -LiteralPath $accountIdentityFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($health.accountScope -ne $accountIdentity.id) { throw 'ACCOUNT_SWITCH_REQUIRES_DSH_RESTART: Fully exit DSH from the tray and reopen it after switching account.' }
+        }
+        if ($health.ok -ne $true -or $health.project -ne 'WeChatAgent' -or [IO.Path]::GetFullPath($health.projectRoot) -ne [IO.Path]::GetFullPath($root)) { throw 'Install the DSH plugin from this project packages directory, then fully reopen DSH.' }
+        if ($health.contextMode -ne 'native-session-v1') { throw 'Fully exit DSH from the tray and reopen it to load the native-session plugin.' }
+        if ($health.behaviorPolicy -ne 'local-config-only-v1') { throw 'Fully reopen DSH to load the local-only behavior policy before starting WeChatAgent.' }
+        if ($ntReader -and $health.imageInput -ne 'native-attachment-v1') { throw 'Fully exit DSH from the tray and reopen it to load the image attachment plugin.' }
+        $bridgeEntry = Join-Path $root 'components\qq-bridge\src\social-bridge.js'
+        Start-ServiceProcess 'bridge' $node ('"'+$bridgeEntry+'" "'+(Join-Path $stateDir 'bridge-config.json')+'"') (Join-Path $root 'components\qq-bridge') $bridgeEntry ([int]$config.ports.onebot) $false
+    } else {
+        Write-Output 'AstrBot 对接模式：跳过 DSH 插件与社交桥，仅启动 reader + adapter。'
     }
-    $health = Invoke-RestMethod $dshUrl -Headers @{Authorization='Bearer '+$env:SOCIAL_DSH_TOKEN} -TimeoutSec 3
-    $accountIdentityFile = Join-Path $stateDir 'weflow\active-account.json'
-    if (Test-Path -LiteralPath $accountIdentityFile) {
-        $accountIdentity = Get-Content -LiteralPath $accountIdentityFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($health.accountScope -ne $accountIdentity.id) { throw 'ACCOUNT_SWITCH_REQUIRES_DSH_RESTART: Fully exit DSH from the tray and reopen it after switching account.' }
-    }
-    if ($health.ok -ne $true -or $health.project -ne 'WeChatAgent' -or [IO.Path]::GetFullPath($health.projectRoot) -ne [IO.Path]::GetFullPath($root)) { throw 'Install the DSH plugin from this project packages directory, then fully reopen DSH.' }
-    if ($health.contextMode -ne 'native-session-v1') { throw 'Fully exit DSH from the tray and reopen it to load the native-session plugin.' }
-    if ($health.behaviorPolicy -ne 'local-config-only-v1') { throw 'Fully reopen DSH to load the local-only behavior policy before starting WeChatAgent.' }
-    if ($ntReader -and $health.imageInput -ne 'native-attachment-v1') { throw 'Fully exit DSH from the tray and reopen it to load the image attachment plugin.' }
-    $bridgeEntry = Join-Path $root 'components\qq-bridge\src\social-bridge.js'
-    Start-ServiceProcess 'bridge' $node ('"'+$bridgeEntry+'" "'+(Join-Path $stateDir 'bridge-config.json')+'"') (Join-Path $root 'components\qq-bridge') $bridgeEntry ([int]$config.ports.onebot) $false
     $env:PYTHONUTF8='1'; $env:PYTHONUNBUFFERED='1'
     $env:WECHATAGENT_LOG_DIR=$null; $env:WECHATAGENT_STATE_DIR=$null
     $adapterEntry = Join-Path $PSScriptRoot 'hook-onebot.mjs'

@@ -156,20 +156,23 @@ export class HookOneBot {
   }
   async materializeImage(file) {
     if (!file) fail('INVALID_IMAGE');
-    const tempDir = path.join(root, 'state', 'temp');
+    // 微信 hook 只接受它自己的暂存目录下的文件，先落到 state/files/outgoing/<batch>/。
+    const batch = crypto.createHash('sha256').update(crypto.randomUUID()).digest('hex');
+    const staging = path.join(root, 'state', 'files', 'outgoing', batch);
+    fs.mkdirSync(staging, { recursive: true });
+    const extOf = name => {
+      const m = /\.(\w{2,5})(?:[?#]|$)/.exec(String(name || ''));
+      return m ? m[1].toLowerCase() : 'gif';
+    };
     if (file.startsWith('base64://')) {
-      fs.mkdirSync(tempDir, { recursive: true });
-      const out = path.join(tempDir, 'img-' + crypto.randomUUID() + '.gif');
+      const out = path.join(staging, 'image-' + Date.now() + '.gif');
       fs.writeFileSync(out, Buffer.from(file.slice(9), 'base64'));
       return out;
     }
     if (/^https?:/i.test(file)) {
       const resp = await this.fetch(file, { redirect: 'follow' });
       if (!resp.ok) fail('IMAGE_FETCH_FAILED');
-      const m = /\.(\w{2,5})(?:[?#]|$)/.exec(file);
-      const ext = m ? m[1].toLowerCase() : 'gif';
-      fs.mkdirSync(tempDir, { recursive: true });
-      const out = path.join(tempDir, 'img-' + crypto.randomUUID() + '.' + ext);
+      const out = path.join(staging, 'image-' + Date.now() + '.' + extOf(file));
       fs.writeFileSync(out, Buffer.from(await resp.arrayBuffer()));
       return out;
     }
@@ -177,7 +180,9 @@ export class HookOneBot {
     if (p.startsWith('file://')) { try { p = decodeURIComponent(new URL(p).pathname); } catch {} }
     p = p.replace(/^\/([A-Za-z]:[\\/])/, '$1');
     if (!fs.existsSync(p)) fail('IMAGE_NOT_FOUND');
-    return p;
+    const out = path.join(staging, path.basename(p));
+    fs.copyFileSync(p, out);
+    return out;
   }
   async sendStickerFile(kind, target, filePath) {
     this.reload();

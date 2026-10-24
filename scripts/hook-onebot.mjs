@@ -8,6 +8,7 @@ import {hookAccountProblem} from './wechat-account-check.mjs';
 import {proactivePolicy,withinProactiveWindow,conversationSnapshot,declinedProactive} from '../components/qq-bridge/src/core/proactive-policy.js';
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { WebSocket as AstrBotWebSocket } from 'ws';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -152,6 +153,43 @@ export class HookOneBot {
     const result = await this.reader('/api/v1/messages?talker=' + encodeURIComponent(wxid) + '&limit=100');
     if (!Array.isArray(result.messages)) fail('INVALID_RECEIPT_RESPONSE');
     return result.messages;
+  }
+  async materializeImage(file) {
+    if (!file) fail('INVALID_IMAGE');
+    const tempDir = path.join(root, 'state', 'temp');
+    if (file.startsWith('base64://')) {
+      fs.mkdirSync(tempDir, { recursive: true });
+      const out = path.join(tempDir, 'img-' + crypto.randomUUID() + '.gif');
+      fs.writeFileSync(out, Buffer.from(file.slice(9), 'base64'));
+      return out;
+    }
+    if (/^https?:/i.test(file)) {
+      const resp = await this.fetch(file, { redirect: 'follow' });
+      if (!resp.ok) fail('IMAGE_FETCH_FAILED');
+      const m = /\.(\w{2,5})(?:[?#]|$)/.exec(file);
+      const ext = m ? m[1].toLowerCase() : 'gif';
+      fs.mkdirSync(tempDir, { recursive: true });
+      const out = path.join(tempDir, 'img-' + crypto.randomUUID() + '.' + ext);
+      fs.writeFileSync(out, Buffer.from(await resp.arrayBuffer()));
+      return out;
+    }
+    let p = file;
+    if (p.startsWith('file://')) { try { p = decodeURIComponent(new URL(p).pathname); } catch {} }
+    p = p.replace(/^\/([A-Za-z]:[\\/])/, '$1');
+    if (!fs.existsSync(p)) fail('IMAGE_NOT_FOUND');
+    return p;
+  }
+  async sendStickerFile(kind, target, filePath) {
+    this.reload();
+    if (!this.allowed(kind, target)) fail('CONVERSATION_NOT_ALLOWED');
+    const identity = await this.checkNative();
+    if (!this.status.native_sticker_send) fail('NATIVE_STICKER_UNAVAILABLE');
+    const wxid = await this.resolveTarget(kind, target);
+    const md5 = crypto.createHash('md5').update(fs.readFileSync(filePath)).digest('hex');
+    const accepted = await this.native('/SendStickerMsg', { wxidorgid: wxid, sticker: { md5 }, path: filePath }, identity.account);
+    if (accepted?.ret !== 0) fail('NATIVE_STICKER_REJECTED');
+    this.status.confirmed_sends = (this.status.confirmed_sends ?? 0) + 1;
+    return { message_id: 0, file: filePath, media_type: 'wechat-sticker' };
   }
   async send(kind, target, text, deliveryId, proactive) {
     const key = `${kind}:${target}`;
@@ -371,8 +409,26 @@ export class HookOneBot {
         if(Array.isArray(params.message)&&params.message.length===1&&params.message[0]?.type==='wechat_sticker'){
           data=await this.sendSticker(kind,target,String(params.message[0].data?.id??''),deliveryId,proactive,params.wechatagent_receipt_only===true,params.wechatagent_defer_receipt===true,params.wechatagent_deadline_at,params.wechatagent_abandon_delivery===true);
         }else{
-          const text=textSegments(params.message);
-          data=await this.send(kind,target,text,deliveryId,proactive);
+          const rawList = typeof params.message === 'string'
+            ? [{ type: 'text', data: { text: params.message } }]
+            : (Array.isArray(params.message) ? params.message : []);
+          const hasImage = rawList.some(seg => seg?.type === 'image');
+          if (!hasImage) {
+            const text=textSegments(params.message);
+            data=await this.send(kind,target,text,deliveryId,proactive);
+          } else {
+            const pendingText = [];
+            let last = {};
+            for (const seg of rawList) {
+              if (seg?.type === 'text' && typeof seg.data?.text === 'string') { pendingText.push(seg.data.text); continue; }
+              if (seg?.type !== 'image') continue;
+              if (pendingText.length) { last = await this.send(kind, target, pendingText.join(''), deliveryId, proactive); pendingText.length = 0; }
+              const local = await this.materializeImage(String(seg.data?.file ?? seg.data?.url ?? ''));
+              last = await this.sendStickerFile(kind, target, local);
+            }
+            if (pendingText.length) last = await this.send(kind, target, pendingText.join(''), deliveryId, proactive);
+            data = last;
+          }
         }
       } else if(['get_sticker_list','get_sticker_labels','save_sticker_labels'].includes(action)){
         const kind=params.kind,target=String(params.target??'');
@@ -452,7 +508,12 @@ export class HookOneBot {
   }
   async connectOneBot() {
     while (!this.stopped) {
-      const socket = new WebSocket(this.api.onebot_ws_url);
+      // aiocqhttp (AstrBot) 反向 WS 依赖 X-Self-ID / X-Client-Role 头，
+      // 全局 WebSocket 不能自定义 header，因此使用 ws 包。
+      const selfId = onebotId(this.ownWxid);
+      const headers = { 'X-Self-ID': String(selfId), 'X-Client-Role': 'Universal' };
+      if (this.api.onebot_token) headers.Authorization = 'Bearer ' + this.api.onebot_token;
+      const socket = new AstrBotWebSocket(this.api.onebot_ws_url, { headers });
       this.socket = socket;
       await new Promise(resolve => {
         const connectTimer = setTimeout(() => socket.close(), 8000);

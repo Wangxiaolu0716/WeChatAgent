@@ -199,15 +199,21 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       const matchesDsh=dshConfigurationMatches(root,snapshot().config,health);
       if(optionalJson(preferenceFile).dshRestartRequired && matchesDsh)atomic(preferenceFile,{...optionalJson(preferenceFile),dshRestartRequired:false});
       const dshReady = health?.ok === true && health.project === 'WeChatAgent' && sameProjectPath(health.projectRoot,root) && health.contextMode === 'native-session-v1' && health.behaviorPolicy === 'local-config-only-v1' && health.imageInput === 'native-attachment-v1' && (!optionalJson(preferenceFile).dshRestartRequired || matchesDsh);
+      const astrbotMode = config.runtime?.integration === 'astrbot';
       const readerReady = !!readerState && !!value(1) && !readerState.lastError;
-      const bridgeReady = !!value(4) && adapter?.ob_connected === true;
+      const bridgeReady = astrbotMode
+        ? adapter?.ob_connected === true
+        : (!!value(4) && adapter?.ob_connected === true);
       const hookReady = adapter?.hook_connected === true && adapter?.hook_account_verified === true && adapter?.version === config.hook.expectedVersion;
-      const ready = readerReady && bridgeReady && hookReady && dshReady && adapter?.reader_connected === true;
+      const effectiveDshReady = astrbotMode || dshReady;
+      const ready = readerReady && bridgeReady && hookReady && effectiveDshReady && adapter?.reader_connected === true;
       const { rows } = buffered();
       const services = [
         { id: 'reader', label: '微信读取', ready: readerReady, detail: readerReady ? '数据库可读，消息同步正常' : readerState?.lastError ? '读取异常，请重新连接并验证' : readerFailureDetail(), port: config.ports.weflow },
         { id: 'bridge', label: '消息桥接', ready: bridgeReady && hookReady && adapter?.reader_connected === true, detail: bridgeReady && hookReady && adapter?.reader_connected ? '收发连接正常，账号已核验' : !hookReady ? '等待匹配微信登录与发送连接' : '等待消息桥接连接', port: config.ports.adapter },
-        { id: 'dsh', label: '模型连接', ready: dshReady, detail: dshReady ? 'DSH 插件已连接' : '打开 DSH 并启用本项目插件', port: config.ports.dshPlugin },
+        astrbotMode
+          ? { id: 'astrbot', label: 'AstrBot 连接', ready: bridgeReady, detail: bridgeReady ? 'AstrBot OneBot 已连接，发送走静默通道' : '等待连接 AstrBot 反向 WS', port: config.ports.onebot }
+          : { id: 'dsh', label: '模型连接', ready: dshReady, detail: dshReady ? 'DSH 插件已连接' : '打开 DSH 并启用本项目插件', port: config.ports.dshPlugin },
       ];
       const running = !!readerState || !!adapter || !!value(4);
       return { ready, running, services, lastError: safeText(adapter?.last_error ?? ''),
@@ -619,7 +625,10 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     let attempts=0;
     const listen=()=>{
       attempts++;
-      const ready=()=>{server.removeListener('error',failed);resolve(server.address());};
+      const ready=()=>{server.removeListener('error',failed);
+        const cfgNow=snapshot().config;
+        if(cfgNow.runtime?.integration==='astrbot'&&cfgNow.runtime?.autoStart!==false)setTimeout(()=>{try{startJob({action:'start'});}catch{}},1200);
+        resolve(server.address());};
       const failed=error=>{server.removeListener('listening',ready);if(port===0&&attempts<16&&['EADDRINUSE','EACCES'].includes(error.code)){listen();return;}reject(error);};
       server.once('error',failed);
       server.once('listening',ready);

@@ -383,8 +383,13 @@ async function copyPluginPath(button) {
 }
 function connectionsPage() {
   const r = state.reader;
+  const astrbotMode = state.draft?.runtime?.integration === 'astrbot';
   state.readerDraft ??= { dbPath: r?.dbPath ?? '', myWxid: r?.myWxid ?? '', decryptKey: '' };
-  return `<div class="section-stack"><section class="card">${header('模型连接', '使用你已在 DSH 中配置的模型。', '', 'plug')}<div class="form-grid">${field('DSH 程序位置', 'runtime.dshDesktop', { full: true, browse: 'exe', placeholder: '选择 DeepSeek Harness.exe', help: '启动时若 DSH 尚未打开，会尝试打开这个程序。' })}${field('模型提供方标识', 'dsh.provider', { help: '与 DSH 中的 provider 标识一致。' })}${field('模型标识', 'dsh.model', { help: '图片理解需要当前模型支持图片输入。' })}</div>${pluginPathField()}<div class="notice plain">${icon('info')}<span>修改模型后：保存设置 → 在诊断页准备配置 → 从托盘完全退出并重新打开 DSH → 重启服务。</span></div></section>
+  const modeCard = `<section class="card">${header('对接模式', '选择消息交给谁处理。切换后保存并重启服务。', '', 'plug')}<div class="form-grid"><div class="field full"><label for="field-integration">消息处理方</label><select id="field-integration" data-path="runtime.integration"><option value="astrbot" ${astrbotMode ? 'selected' : ''}>AstrBot（OneBot v11，静默发送）</option><option value="dsh" ${astrbotMode ? '' : 'selected'}>DSH 助手</option></select><small>AstrBot 模式只启动读取服务与 OneBot 适配器，不会打开或占用 DSH。</small></div></div></section>`;
+  const modelCard = astrbotMode
+    ? `<section class="card">${header('AstrBot 连接', '消息经 OneBot v11 反向 WebSocket 交给 AstrBot 处理。', '', 'plug')}<div class="form-grid">${field('AstrBot 反向 WS 端口', 'ports.onebot', { type: 'number', min: 1024, max: 65535, help: 'AstrBot 平台配置里的 ws_reverse_port，默认 11229。' })}${field('OneBot 鉴权 Token', 'runtime.onebotToken', { full: true, help: '与 AstrBot 平台配置的 ws_reverse_token 一致；留空表示不校验。' })}</div><div class="notice plain">${icon('info')}<span>模型、人格与插件全部在 AstrBot 侧配置；本程序只负责微信收发与静默发送。</span></div></section>`
+    : `<section class="card">${header('模型连接', '使用你已在 DSH 中配置的模型。', '', 'plug')}<div class="form-grid">${field('DSH 程序位置', 'runtime.dshDesktop', { full: true, browse: 'exe', placeholder: '选择 DeepSeek Harness.exe', help: '启动时若 DSH 尚未打开，会尝试打开这个程序。' })}${field('模型提供方标识', 'dsh.provider', { help: '与 DSH 中的 provider 标识一致。' })}${field('模型标识', 'dsh.model', { help: '图片理解需要当前模型支持图片输入。' })}</div>${pluginPathField()}<div class="notice plain">${icon('info')}<span>修改模型后：保存设置 → 在诊断页准备配置 → 从托盘完全退出并重新打开 DSH → 重启服务。</span></div></section>`;
+  return `<div class="section-stack">${modeCard}${modelCard}
     <section class="card">${header('微信与读取程序', '选择本机已准备的程序。', '', 'chat')}<div class="form-grid">${field('匹配微信程序位置', 'hook.wechatExecutable', { full: true, browse: 'exe', help: '当前发送后端固定匹配 4.1.10.27。选择程序不会改变兼容版本。' })}${field('Python 程序位置', 'runtime.python', { full: true, browse: 'exe', help: '选择已有环境的 python.exe，也可填写可用的 Python 命令。' })}</div></section>
     ${readerConfigurationCard()}
     <section class="card">${header('高级连接选项', '通常无需修改。端口需要互不重复。', '', 'sliders')}<details><summary>展开端口与发送超时设置</summary><div class="form-grid">${field('读取服务端口', 'ports.weflow', { type: 'number', min: 1024, max: 65535 })}${field('消息桥接端口', 'ports.onebot', { type: 'number', min: 1024, max: 65535 })}${field('适配器状态端口', 'ports.adapter', { type: 'number', min: 1024, max: 65535 })}${field('DSH 插件端口', 'ports.dshPlugin', { type: 'number', min: 1024, max: 65535 })}${field('发送后端地址', 'hook.baseUrl', { full: true, help: '必须为本机回环 HTTP 地址，例如 http://127.0.0.1:30001。' })}${field('发送请求超时 / 秒', 'hook.requestTimeoutMs', { type: 'number', transform: 'seconds', min: 1, max: 5, step: .1 })}${field('回执等待超时 / 秒', 'hook.receiptTimeoutMs', { type: 'number', transform: 'seconds', min: 1, max: 18, step: .1 })}${field('并发发送上限', 'hook.maxConcurrentSends', { type: 'number', min: 1, max: 4, step: 1 })}</div></details></section></div>`;
@@ -408,7 +413,7 @@ let renderSequence = 0;
 async function renderPage() {
   if (!state.config) return;
   const sequence = ++renderSequence; const page = state.page;
-  const title=page==='settings'?'设置 · '+SETTINGS_SECTIONS[state.settingsSection??'chat']:pages[page][0];
+  const title=page==='settings'?'设置 · '+SETTINGS_SECTIONS[state.settingsSection??'connections']:pages[page][0];
   $('#page-title').textContent = title; $('#breadcrumb-page').textContent = title; $('#page-description').textContent = pages[page][1];
   document.title = pages[page][0] + ' · WeChatAgent';
   document.querySelectorAll('[data-page]').forEach(a => page === a.dataset.page ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
@@ -615,6 +620,7 @@ document.addEventListener('input', event => {
   setPath(state.draft, input.dataset.path, value); updateDraftUI();
 });
 document.addEventListener('change', event => {
+  if (event.target.dataset.path === 'runtime.integration') { setPath(state.draft, 'runtime.integration', event.target.value); updateDraftUI(); renderPage(); return; }
   if(event.target.dataset.wakeKey){const key=event.target.dataset.wakeKey;state.draft.wechat.chatModes??={};if(event.target.value==='inherit')delete state.draft.wechat.chatModes[key];else state.draft.wechat.chatModes[key]=event.target.value;updateDraftUI();return;}
   if(event.target.dataset.stickerKey){const key=event.target.dataset.stickerKey;state.draft.wechat.stickers??={};state.draft.wechat.stickers.chats??={};if(event.target.value==='inherit')delete state.draft.wechat.stickers.chats[key];else state.draft.wechat.stickers.chats[key]=event.target.value==='on';updateDraftUI();return;}
   if(event.target.dataset.searchKey){const key=event.target.dataset.searchKey;state.draft.wechat.search??={};state.draft.wechat.search.chats??={};if(event.target.value==='inherit')delete state.draft.wechat.search.chats[key];else state.draft.wechat.search.chats[key]=event.target.value==='on';updateDraftUI();return;}
